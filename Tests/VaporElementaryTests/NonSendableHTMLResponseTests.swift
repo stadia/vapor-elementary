@@ -1,51 +1,38 @@
 import Elementary
+import Testing
 import Vapor
 import VaporElementary
-import XCTVapor
-import XCTest
+import VaporTesting
 
-final class NonSendableHTMLResponseTests: XCTestCase {
-    var app: Application!
-
-    override func setUp() async throws {
-        self.app = try await Application.make(.testing)
-    }
-
-    override func tearDown() async throws {
-        try await self.app.asyncShutdown()
-    }
-
-    func testAllowsSendableValuesToBeWrittenTwice() async throws {
-        self.app.get { req in
-            let html = HTMLResponse { "Hello" }
-            _ = try await html.encodeResponse(for: req).body.collect(on: req.eventLoop)
-            return html
+@Suite("Sendability", .serialized)
+struct NonSendableHTMLResponseTests {
+    @Test func reusableSendableResponse() async throws {
+        let html = HTMLResponse { p { "Hello" } }
+        try await withApp { app in
+            app.get { _ in html }
+            try await app.testing { client in
+                for _ in 0..<2 {
+                    let response = try await client.get("/")
+                    #expect(try await response.body.string() == "<p>Hello</p>")
+                }
+            }
         }
-
-        let response = try await app.sendRequest(.GET, "/")
-        XCTAssertEqual(response.status, .ok)
-        XCTAssertEqual(String(buffer: response.body), #"Hello"#)
     }
 
-    #if compiler(>=6.0)
-    func testRespondsWithANonSendable() async throws {
-        guard #available(macOS 15.0, *) else {
-            throw XCTSkip("Test requires macOS 15.0")
+    @Test func nonSendableHTML() async throws {
+        try await withApp { app in
+            app.get { _ in HTMLResponse { div { NonSendableHTML() } } }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(try await response.body.string() == "<div>Hello</div>")
+            }
         }
-        self.app.get { _ in HTMLResponse { div { NonSendableHTML() } } }
-
-        let response = try await app.sendRequest(.GET, "/")
-        XCTAssertEqual(response.status, .ok)
-        XCTAssertEqual(String(buffer: response.body), #"<div>Hello</div>"#)
     }
-    #endif
 }
 
 @available(*, unavailable)
 extension NonSendableHTML: Sendable {}
 
 struct NonSendableHTML: HTML {
-    var body: some HTML {
-        "Hello"
-    }
+    var body: some HTML { "Hello" }
 }
