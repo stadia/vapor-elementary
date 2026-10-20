@@ -1,5 +1,6 @@
 import Elementary
 import HTTPTypes
+import Synchronization
 import Testing
 import Vapor
 import VaporElementary
@@ -60,6 +61,17 @@ struct HTMLResponseTests {
         }
     }
 
+    @Test func additionalHeadersKeepDefaultContentType() async throws {
+        try await withApp { app in
+            app.get { _ in HTMLResponse(additionalHeaders: [.vary: "HX-Request"]) { p { "OK" } } }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(response.headers[.contentType] == "text/html; charset=utf-8")
+                #expect(response.headers[.vary] == "HX-Request")
+            }
+        }
+    }
+
     @Test func writesToVaporStream() async throws {
         try await withApp { app in
             app.get { _ in
@@ -104,11 +116,17 @@ struct StreamingFailureTests {
         }
     }
 
-    @Test(.timeLimit(.minutes(1))) func consumerFailureCancelsRenderer() async throws {
+    @Test(.timeLimit(.minutes(1))) func consumerFailureStopsRenderer() async throws {
+        let rendered = Mutex(0)
         try await withApp { app in
             app.get { _ in
                 HTMLResponse(chunkSize: 1) {
-                    for _ in 0..<10000 { p { "chunk" } }
+                    for _ in 0..<10000 {
+                        AsyncContent {
+                            rendered.withLock { $0 += 1 }
+                            return p { "chunk" }
+                        }
+                    }
                 }
             }
             try await app.testing { client in
@@ -118,6 +136,8 @@ struct StreamingFailureTests {
                 }
             }
         }
+        // withApp has shut the server down, so the renderer has stopped; it must not have run to the end.
+        #expect(rendered.withLock { $0 } < 10000)
     }
 }
 

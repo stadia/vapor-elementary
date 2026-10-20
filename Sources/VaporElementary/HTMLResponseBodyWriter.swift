@@ -14,8 +14,21 @@ private struct HTMLResponseBodyStreamWriter: HTMLStreamWriter {
     }
 }
 
+/// Errors thrown while streaming an ``HTMLResponse``.
+public enum HTMLResponseError: Error, Sendable {
+    /// A non-sendable HTML value was rendered a second time.
+    case alreadyConsumed
+}
+
 public extension HTTPBodyWriter where Self: ~Escapable {
     /// Render HTML incrementally, suspending the producer while the client is slow.
+    ///
+    /// The caller does not need to write an end marker. Rendering stops cooperatively when
+    /// writing fails or the task is cancelled.
+    ///
+    /// - Parameters:
+    ///   - html: The HTML content to render, consumed by this call.
+    ///   - chunkSize: The number of bytes to write at a time (default is 1024 bytes).
     nonisolated(nonsending) func writeHTML(_ html: sending some HTML & SendableMetatype, chunkSize: Int = 1024) async throws {
         try await renderHTML(_SendableAnyHTMLBox(html), chunkSize: chunkSize)
     }
@@ -28,7 +41,7 @@ extension HTTPBodyWriter where Self: ~Escapable {
             group.addTask {
                 do {
                     guard let html = value.tryTake() else {
-                        throw Abort(.internalServerError, reason: "Non-sendable HTML response already consumed")
+                        throw HTMLResponseError.alreadyConsumed
                     }
                     try await html.render(into: HTMLResponseBodyStreamWriter(channel: channel), chunkSize: chunkSize)
                     channel.finish()
@@ -37,6 +50,8 @@ extension HTTPBodyWriter where Self: ~Escapable {
                     throw error
                 }
             }
+            // Order matters: cancel first so the producer's post-send check turns the
+            // dropped send from finish() into a CancellationError instead of a silent success.
             defer {
                 group.cancelAll()
                 channel.finish()
@@ -44,6 +59,8 @@ extension HTTPBodyWriter where Self: ~Escapable {
             for try await bytes in channel {
                 try await self.write(bytes)
             }
+            // A cancelled consumer sees nil from the channel; never report that as a complete body.
+            try Task.checkCancellation()
             try await group.waitForAll()
         }
     }

@@ -28,6 +28,20 @@ struct NonSendableHTMLResponseTests {
             }
         }
     }
+
+    @Test func nonSendableHTMLIsSingleUse() async throws {
+        let html = HTMLResponse { div { NonSendableHTML() } }
+        try await withApp { app in
+            app.get { _ in html }
+            try await app.testing { client in
+                #expect(try await client.get("/").body.string() == "<div>Hello</div>")
+                let second = try await client.get("/")
+                await #expect(throws: HTMLResponseError.alreadyConsumed) {
+                    _ = try await second.body.string()
+                }
+            }
+        }
+    }
 }
 
 @available(*, unavailable)
