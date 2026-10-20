@@ -1,110 +1,147 @@
 import Elementary
+import HTTPTypes
+import Synchronization
+import Testing
 import Vapor
 import VaporElementary
-import XCTVapor
-import XCTest
+import VaporTesting
 
-final class HTMLResponseTests: XCTestCase {
-    var app: Application!
-
-    override func setUp() async throws {
-        self.app = try await Application.make(.testing)
-    }
-
-    override func tearDown() async throws {
-        try await self.app.asyncShutdown()
-    }
-
-    func testSetsHeadersAndStatus() async throws {
-        self.app.get { _ in HTMLResponse { EmptyHTML() } }
-
-        let response = try await app.sendRequest(.GET, "/")
-        XCTAssertEqual(response.status, .ok)
-        XCTAssertEqual(response.headers.contentType?.description, "text/html; charset=utf-8")
-        XCTAssertEqual(response.body.readableBytes, 0)
-    }
-
-    func testRespondsWithAPage() async throws {
-        self.app.get { _ in HTMLResponse { TestPage() } }
-
-        let response = try await app.sendRequest(.GET, "/")
-        XCTAssertEqual(
-            String(buffer: response.body),
-            #"<!DOCTYPE html><html><head><title>Test Page</title><link rel="stylesheet" href="/styles.css"></head><body><h1 id="foo">bar</h1></body></html>"#
-        )
-    }
-
-    func testRespondsWithAFragment() async throws {
-        self.app.get { _ in HTMLResponse { p {} } }
-
-        let response = try await app.sendRequest(.GET, "/")
-        XCTAssertEqual(String(buffer: response.body), #"<p></p>"#)
-    }
-
-    func testRespondsWithALargeDocument() async throws {
-        let count = 1000
-        self.app.get { _ in
-            HTMLResponse {
-                for _ in 0..<count {
-                    p {}
-                }
+@Suite("HTML responses", .serialized)
+struct HTMLResponseTests {
+    @Test func statusAndContentType() async throws {
+        try await withApp { app in
+            app.get { _ in HTMLResponse { EmptyHTML() } }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(response.status == .ok)
+                #expect(response.headers[.contentType] == "text/html; charset=utf-8")
+                #expect(try await response.body.string() ?? "" == "")
             }
         }
-
-        let response = try await app.sendRequest(.GET, "/")
-        XCTAssertEqual(String(buffer: response.body), Array(repeating: "<p></p>", count: count).joined())
     }
 
-    func testRespondsWithCustomHeaders() async throws {
-        self.app.get { _ in
-            var response = HTMLResponse(additionalHeaders: ["foo": "bar"]) { EmptyHTML() }
-            response.headers.add(name: "hx-refresh", value: "true")
-            return response
+    @Test func documentAndKoreanText() async throws {
+        try await withApp { app in
+            app.get { _ in HTMLResponse { TestPage() } }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(try await response.body.string() == "<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"UTF-8\"><title>소식</title></head><body><h1>Swift 소식</h1></body></html>")
+            }
         }
-
-        let response = try await app.sendRequest(.GET, "/")
-
-        XCTAssertEqual(response.headers["foo"], ["bar"])
-        XCTAssertEqual(response.headers["hx-refresh"], ["true"])
-        XCTAssertEqual(response.headers.contentType?.description, "text/html; charset=utf-8")
     }
 
-    func testRespondsWithOverwrittenContentType() async throws {
-        self.app.get { _ in
-            HTMLResponse(additionalHeaders: ["Content-Type": "some"]) { EmptyHTML() }
+    @Test func fragmentAndLargeStream() async throws {
+        try await withApp { app in
+            app.get { _ in
+                HTMLResponse(chunkSize: 32) {
+                    for _ in 0..<1000 { p { "한글 & <Swift>" } }
+                }
+            }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(try await response.body.string() == String(repeating: "<p>한글 &amp; &lt;Swift&gt;</p>", count: 1000))
+            }
         }
-
-        let response = try await app.sendRequest(.GET, "/")
-
-        XCTAssertEqual(response.headers["Content-Type"], ["some"])
     }
 
-    func testRespondsByWritingToStream() async throws {
-        self.app.get { _ in
-            Response(
-                status: .ok,
-                headers: [:],
-                body: .init(asyncStream: { writer in
+    @Test func customHeadersAndContentType() async throws {
+        try await withApp { app in
+            app.get { _ in
+                var response = HTMLResponse(additionalHeaders: [.vary: "HX-Request", .contentType: "text/custom"]) { p { "OK" } }
+                response.headers[HTTPField.Name("HX-Refresh")!] = "true"
+                return response
+            }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(response.headers[.contentType] == "text/custom")
+                #expect(response.headers[.vary] == "HX-Request")
+                #expect(response.headers[HTTPField.Name("HX-Refresh")!] == "true")
+                #expect(try await response.body.string() == "<p>OK</p>")
+            }
+        }
+    }
+
+    @Test func additionalHeadersKeepDefaultContentType() async throws {
+        try await withApp { app in
+            app.get { _ in HTMLResponse(additionalHeaders: [.vary: "HX-Request"]) { p { "OK" } } }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(response.headers[.contentType] == "text/html; charset=utf-8")
+                #expect(response.headers[.vary] == "HX-Request")
+            }
+        }
+    }
+
+    @Test func writesToVaporStream() async throws {
+        try await withApp { app in
+            app.get { _ in
+                Response(body: .init(stream: { writer in
                     try await writer.writeHTML(p { "Hello" })
-                    try await writer.write(.end)
-                })
-            )
+                }))
+            }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                #expect(try await response.body.string() == "<p>Hello</p>")
+            }
         }
-
-        let response = try await app.sendRequest(.GET, "/")
-
-        XCTAssertEqual(String(buffer: response.body), "<p>Hello</p>")
     }
 }
 
-struct TestPage: HTMLDocument {
-    var title: String { "Test Page" }
+struct TestPage: HTMLDocument, Sendable {
+    var title: String { "소식" }
+    var lang: String { "ko" }
+    var head: some HTML { EmptyHTML() }
+    var body: some HTML { h1 { "Swift 소식" } }
+}
 
-    var head: some HTML {
-        link(.rel(.stylesheet), .href("/styles.css"))
+private enum RenderFailure: Error { case expected }
+
+@Suite("Streaming failures", .serialized)
+struct StreamingFailureTests {
+    @Test(.timeLimit(.minutes(1))) func renderingErrorIsPropagated() async throws {
+        try await withApp { app in
+            app.get { _ in
+                HTMLResponse {
+                    AsyncContent {
+                        try await failingContent()
+                    }
+                }
+            }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                await #expect(throws: RenderFailure.self) {
+                    _ = try await response.body.string()
+                }
+            }
+        }
     }
 
-    var body: some HTML {
-        h1(.id("foo")) { "bar" }
+    @Test(.timeLimit(.minutes(1))) func consumerFailureStopsRenderer() async throws {
+        let rendered = Mutex(0)
+        try await withApp { app in
+            app.get { _ in
+                HTMLResponse(chunkSize: 1) {
+                    for _ in 0..<10000 {
+                        AsyncContent {
+                            rendered.withLock { $0 += 1 }
+                            return p { "chunk" }
+                        }
+                    }
+                }
+            }
+            try await app.testing { client in
+                let response = try await client.get("/")
+                await #expect(throws: RenderFailure.self) {
+                    try await response.body.withStreamingBytes { _ in throw RenderFailure.expected }
+                }
+            }
+        }
+        // withApp has shut the server down, so the renderer has stopped; it must not have run to the end.
+        #expect(rendered.withLock { $0 } < 10000)
     }
+}
+
+private func failingContent() async throws -> EmptyHTML {
+    await Task.yield()
+    throw RenderFailure.expected
 }
